@@ -1,0 +1,544 @@
+/**
+ * 05doc-tire-assignment-dragdrop.js
+ * Responsabilidad: Sistema de arrastrar y soltar (Drag & Drop) para el taller visual.
+ * Permite mover llantas entre:
+ * - Almacén lateral → Posición del chasis (Asignación)
+ * - Posición del chasis → Otra posición del chasis (Rotación/Intercambio)
+ * - Posición del chasis → Zona de retiro (Baja/Desmontaje)
+ * Maneja colisiones e intercambios automáticos sin modales intrusivos.
+ */
+(function(module) {
+    'use strict';
+    var State = module.State;
+    var Events = module.Events;
+
+    /**
+     * Referencias a elementos del DOM
+     */
+    var container = null;
+    var trashZone = null;
+    var tireWarehouse = null;
+    var stagingZone = null; // Nueva zona de cuarentena
+
+    /**
+     * Datos del elemento que se está arrastrando
+     */
+    var dragData = {
+        element: null,
+        tireCode: '',
+        tireName: '',
+        tireSize: '',
+        sourceType: '', // 'warehouse', 'chassis'
+        sourcePosition: '',
+        sourceVehicle: '',
+        sourceWarehouse: ''
+    };
+
+    /**
+     * Indica si se está realizando un drag
+     */
+    var isDragging = false;
+
+    /**
+     * Inicializa el módulo de drag & drop
+     */
+    function init() {
+        container = document.getElementById('dynamic-truck-container');
+        trashZone = document.getElementById('trash-drop-zone');
+        tireWarehouse = document.getElementById('doc-details-table');
+        stagingZone = document.getElementById('staging-zone');
+
+        if (!container) {
+            console.warn('[doc-tire-assignment-dragdrop] Contenedor #dynamic-truck-container no encontrado.');
+            return;
+        }
+
+        // Inicializar eventos de drag & drop en el contenedor del chasis
+        initChassisDragDrop();
+
+        // Inicializar zona de retiro/baja
+        initTrashZone();
+
+        // Inicializar zona de staging (cuarentena)
+        initStagingZone();
+
+        // Escuchar eventos de renderizado para re-inicializar listeners si es necesario
+        Events.on('chassis:rendered', function() {
+            // No necesitamos re-inicializar todo, solo asegurarnos de que los nuevos elementos tengan draggable=true
+            // Los eventos están delegados al container, así que funcionan automáticamente.
+        });
+
+        Events.on('tire:warehouse:rendered', function() {
+            initWarehouseDrag();
+        });
+
+        console.log('[doc-tire-assignment-dragdrop] Módulo de drag & drop inicializado.');
+    }
+
+    /**
+     * Inicializa eventos de drag & drop en el chasis
+     */
+    function initChassisDragDrop() {
+        if (!container) return;
+
+        container.addEventListener('dragstart', handleDragStart, false);
+        container.addEventListener('dragend', handleDragEnd, false);
+        container.addEventListener('dragover', handleDragOver, false);
+        container.addEventListener('dragenter', handleDragEnter, false);
+        container.addEventListener('dragleave', handleDragLeave, false);
+        container.addEventListener('drop', handleDrop, false);
+    }
+
+    /**
+     * Inicializa la zona de retiro (trash)
+     */
+    function initTrashZone() {
+        if (!trashZone) return;
+
+        trashZone.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            trashZone.style.backgroundColor = '#ffebee';
+            trashZone.style.borderColor = '#d32f2f';
+            trashZone.style.transform = 'scale(1.02)';
+        });
+
+        trashZone.addEventListener('dragleave', function(e) {
+            trashZone.style.backgroundColor = '#fff5f5';
+            trashZone.style.borderColor = '#dc3545';
+            trashZone.style.transform = 'scale(1)';
+        });
+
+        trashZone.addEventListener('drop', handleTrashDrop);
+    }
+
+    /**
+     * Inicializa la zona de Staging (Cuarentena)
+     */
+    function initStagingZone() {
+        if (!stagingZone) return;
+
+        stagingZone.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            stagingZone.classList.add('drag-over');
+        });
+
+        stagingZone.addEventListener('dragleave', function(e) {
+            stagingZone.classList.remove('drag-over');
+        });
+        
+        // El drop en staging se maneja visualmente, las acciones son por botones
+    }
+
+    /**
+     * Inicializa el drag en la tabla del almacén de llantas
+     */
+    function initWarehouseDrag() {
+        if (!tireWarehouse) return;
+        tireWarehouse.addEventListener('dragstart', handleWarehouseDragStart, false);
+        tireWarehouse.addEventListener('dragend', handleDragEnd, false);
+    }
+
+    // =========================================================================
+    // MANEJADORES DE EVENTOS DE DRAG
+    // =========================================================================
+
+    function handleDragStart(e) {
+        var target = e.target.closest('.tyre-drop-zone');
+        if (!target || target.getAttribute('data-has-tire') !== 'true') return;
+
+        var tireCode = target.getAttribute('data-tire-code');
+        if (!tireCode) return;
+
+        isDragging = true;
+
+        dragData = {
+            element: target,
+            tireCode: tireCode,
+            tireName: target.querySelector('.fw-bold') ? target.querySelector('.fw-bold').textContent.trim() : tireCode,
+            tireSize: target.querySelector('.text-xxxs') ? target.querySelector('.text-xxxs').textContent.trim() : '',
+            sourceType: 'chassis',
+            sourcePosition: target.getAttribute('data-position'),
+            sourceVehicle: target.getAttribute('data-vehicle-code'),
+            sourceWarehouse: ''
+        };
+
+        e.dataTransfer.setData('text/plain', JSON.stringify({
+            type: 'chassis',
+            tireCode: tireCode
+        }));
+        e.dataTransfer.effectAllowed = 'move';
+        target.classList.add('dragging');
+    }
+
+    function handleWarehouseDragStart(e) {
+        console.log('Inicia el arrastre desde el llanta');
+        var row = e.target.closest('tr');
+        if (!row) return;
+
+        var tireCode = row.getAttribute('data-tire-code');
+        if (!tireCode) return;
+
+        // Validación segura contra el Estado global
+        var alreadyMounted = State.llantasSeleccionadas.some(function(l) {
+            return l.tire_code === tireCode && (l.action_type === 'ASSIGN' || l.action_type === 'TRANSFER');
+        });
+
+        if (alreadyMounted) {
+            e.preventDefault();
+            alert('Esta llanta ya está montada en el chasis.');
+            return;
+        }
+
+        isDragging = true;
+
+        dragData = {
+            element: row,
+            tireCode: tireCode,
+            tireName: row.querySelector('td:nth-child(2)') ? row.querySelector('td:nth-child(2)').textContent.trim() : tireCode,
+            tireSize: row.querySelector('td:nth-child(3)') ? row.querySelector('td:nth-child(3)').textContent.trim() : '',
+            sourceType: 'warehouse',
+            sourcePosition: '',
+            sourceVehicle: '',
+            sourceWarehouse: 'MAIN'
+        };
+
+        e.dataTransfer.setData('text/plain', JSON.stringify({
+            type: 'warehouse',
+            tireCode: tireCode
+        }));
+        e.dataTransfer.effectAllowed = 'move';
+        row.classList.add('dragging');
+    }
+
+    function handleDragEnd(e) {
+        console.log('Finaliza el arrastre');
+        if (dragData.element) {
+            dragData.element.classList.remove('dragging');
+            dragData.element.style.opacity = '1';
+        }
+        if (stagingZone) stagingZone.classList.remove('drag-over');
+        if (trashZone) {
+            trashZone.style.backgroundColor = '#fff5f5';
+            trashZone.style.borderColor = '#dc3545';
+            trashZone.style.transform = 'scale(1)';
+        }
+        
+        // Limpiar highlights del chasis
+        var zones = document.querySelectorAll('.tyre-drop-zone');
+        zones.forEach(function(z) {
+            z.style.boxShadow = '';
+            z.style.transform = '';
+            z.style.backgroundColor = '';
+        });
+
+        isDragging = false;
+        dragData = {};
+    }
+
+    function handleDragOver(e) {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        var dropZone = e.target.closest('.tyre-drop-zone');
+        
+        if (dropZone) {
+            var hasTire = dropZone.getAttribute('data-has-tire') === 'true';
+            dropZone.style.boxShadow = hasTire ? '0 0 0 3px rgba(255, 193, 7, 0.6)' : '0 0 0 3px rgba(13, 110, 253, 0.6)';
+            dropZone.style.transform = 'scale(1.05)';
+        }
+    }
+
+    function handleDragEnter(e) {
+        e.preventDefault();
+    }
+
+    function handleDragLeave(e) {
+        var dropZone = e.target.closest('.tyre-drop-zone');
+        if (dropZone) {
+            dropZone.style.boxShadow = '';
+            dropZone.style.transform = '';
+        }
+    }
+
+    function handleDrop(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        var dropZone = e.target.closest('.tyre-drop-zone');
+        
+        if (!dropZone) return;
+
+        dropZone.style.boxShadow = '';
+        dropZone.style.transform = '';
+
+        var positionKey = dropZone.getAttribute('data-position');
+        var vehicleCode = dropZone.getAttribute('data-vehicle-code');
+        var hasTire = dropZone.getAttribute('data-has-tire') === 'true';
+        var existingTireCode = dropZone.getAttribute('data-tire-code') || '';
+
+        if (!isDragging || !dragData.sourceType) return;
+        if (dragData.tireCode === existingTireCode) return;
+
+        // CASO 1: Almacén -> Vacío (Asignación)
+        if (dragData.sourceType === 'warehouse' && !hasTire) {
+            assignTireToPosition(dragData.tireCode, dragData.tireName, dragData.tireSize, vehicleCode, positionKey);
+            return;
+        }
+
+        // CASO 2: Chasis -> Vacío (Reubicación)
+        if (dragData.sourceType === 'chassis' && !hasTire) {
+            moveTireToPosition(dragData.tireCode, dragData.tireName, dragData.tireSize, 
+                               dragData.sourcePosition, dragData.sourceVehicle,
+                               vehicleCode, positionKey);
+            return;
+        }
+
+        // CASO 3: Chasis -> Ocupado (Intercambio directo)
+        if (dragData.sourceType === 'chassis' && hasTire) {
+            swapTires(dragData, {
+                tireCode: existingTireCode,
+                position: positionKey,
+                vehicleCode: vehicleCode,
+                zone: dropZone
+            });
+            return;
+        }
+
+        // CASO 4: Almacén -> Ocupado (REEMPLAZO DIRECTO A STAGING - SIN MODAL)
+        if (dragData.sourceType === 'warehouse' && hasTire) {
+            executeReplaceToStaging(dragData.tireCode, dragData.tireName, dragData.tireSize, 
+                                    existingTireCode, vehicleCode, positionKey);
+            return;
+        }
+    }
+
+    function handleTrashDrop(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        trashZone.style.backgroundColor = '#fff5f5';
+        trashZone.style.borderColor = '#dc3545';
+        trashZone.style.transform = 'scale(1)';
+
+        if (!isDragging || dragData.sourceType !== 'chassis') return;
+
+        var pos = getPositionFromState(dragData.sourcePosition);
+        if (!pos || !pos.hasTire) {
+            alert('La posición ya está vacía.');
+            return;
+        }
+
+        // Dar de baja directa (Scrap) o enviar a staging según prefieras. 
+        // Aquí lo mandamos a staging para que el usuario decida si es baja o taller.
+        addToStagingZone(dragData.tireCode, dragData.sourceVehicle, dragData.sourcePosition);
+        
+        // Limpiar chasis
+        updatePositionInDOM(dragData.sourceVehicle, dragData.sourcePosition, '', '', '');
+        
+        // Registrar movimiento de retiro temporal
+        updateTireInState(dragData.tireCode, dragData.tireName, {
+            action_type: 'REMOVE',
+            vehicle_code_from: dragData.sourceVehicle,
+            position_from: dragData.sourcePosition,
+            warehouse_code_to: 'PENDING'
+        });
+        
+        State.markDirty();
+        updateSummary();
+    }
+
+    // =========================================================================
+    // ACCIONES DE NEGOCIO
+    // =========================================================================
+
+    function assignTireToPosition(tireCode, tireName, tireSize, vehicleCode, positionKey) {
+        updatePositionInDOM(vehicleCode, positionKey, tireCode, tireName, tireSize);
+        removeTireFromWarehouse(tireCode);
+
+        State.llantasSeleccionadas.push({
+            tire_code: tireCode,
+            tire_name: tireName,
+            action_type: 'ASSIGN',
+            vehicle_code_to: vehicleCode,
+            position_to: positionKey,
+            warehouse_code_from: 'MAIN'
+        });
+        
+        State.markDirty();
+        updateSummary();
+        Events.emit('tire:assigned', { tireCode: tireCode, position: positionKey });
+    }
+
+    function moveTireToPosition(tireCode, tireName, tireSize, fromPos, fromVeh, toVeh, toPos) {
+        updatePositionInDOM(fromVeh, fromPos, '', '', '');
+        updatePositionInDOM(toVeh, toPos, tireCode, tireName, tireSize);
+
+        var detail = State.llantasSeleccionadas.find(l => l.tire_code === tireCode);
+        if (detail) {
+            detail.action_type = (fromVeh === toVeh) ? 'ROTATE' : 'TRANSFER';
+            detail.position_from = fromPos;
+            detail.position_to = toPos;
+            detail.vehicle_code_from = fromVeh;
+            detail.vehicle_code_to = toVeh;
+        }
+        State.markDirty();
+        updateSummary();
+    }
+
+    function swapTires(sourceData, targetData) {
+        updatePositionInDOM(targetData.vehicleCode, targetData.position, sourceData.tireCode, sourceData.tireName, sourceData.tireSize);
+        updatePositionInDOM(sourceData.sourceVehicle, sourceData.sourcePosition, targetData.tireCode, '', targetData.tireSize);
+
+        updateTireInState(sourceData.tireCode, sourceData.tireName, {
+            action_type: 'ROTATE',
+            vehicle_code_from: sourceData.sourceVehicle,
+            position_from: sourceData.sourcePosition,
+            vehicle_code_to: targetData.vehicleCode,
+            position_to: targetData.position
+        });
+        
+        updateTireInState(targetData.tireCode, '', {
+            action_type: 'ROTATE',
+            vehicle_code_from: targetData.vehicleCode,
+            position_from: targetData.position,
+            vehicle_code_to: sourceData.sourceVehicle,
+            position_to: sourceData.sourcePosition
+        });
+        
+        State.markDirty();
+        updateSummary();
+    }
+
+    // === LA MAGIA: Reemplazo directo a Staging (Sin Modal) ===
+    function executeReplaceToStaging(newCode, newName, newSize, oldCode, vehicleCode, positionKey) {
+        // 1. Poner la nueva llanta en el chasis
+        updatePositionInDOM(vehicleCode, positionKey, newCode, newName, newSize);
+        removeTireFromWarehouse(newCode);
+
+        // 2. Registrar la nueva asignación
+        updateTireInState(newCode, newName, {
+            action_type: 'ASSIGN',
+            vehicle_code_to: vehicleCode,
+            position_to: positionKey,
+            warehouse_code_from: 'MAIN'
+        });
+
+        // 3. Enviar la llanta vieja a STAGING (Cuarentena)
+        addToStagingZone(oldCode, vehicleCode, positionKey);
+
+        State.markDirty();
+        updateSummary();
+        Events.emit('tire:replaced', { oldTire: oldCode, newTire: newCode, position: positionKey });
+    }
+
+    // =========================================================================
+    // GESTIÓN DE STAGING Y UTILIDADES
+    // =========================================================================
+
+    function addToStagingZone(tireCode, vehicleCode, positionKey) {
+        if (!stagingZone) return;
+        
+        var emptyMsg = document.getElementById('staging-empty-msg');
+        if (emptyMsg) emptyMsg.style.display = 'none';
+
+        var card = document.createElement('div');
+        card.className = 'staging-tire-card';
+        card.setAttribute('data-tire-code', tireCode);
+        card.innerHTML = 
+            '<div class="d-flex align-items-center gap-2">' +
+            '<i class="fa-solid fa-triangle-exclamation text-danger"></i>' +
+            '<div><strong class="d-block">' + escapeHtml(tireCode) + '</strong><small class="text-muted">Retirada de ' + escapeHtml(positionKey) + '</small></div>' +
+            '</div>' +
+            '<div>' +
+            '<button class="btn btn-outline-warning btn-sm staging-action-btn" onclick="window.DocTireAssignment.DragDrop.sendToDest(\'TALLER\', \'' + tireCode + '\')"><i class="fa-solid fa-wrench"></i> Taller</button>' +
+            '<button class="btn btn-outline-info btn-sm staging-action-btn" onclick="window.DocTireAssignment.DragDrop.sendToDest(\'ALMACEN\', \'' + tireCode + '\')"><i class="fa-solid fa-warehouse"></i> Almacén</button>' +
+            '</div>';
+        
+        stagingZone.appendChild(card);
+    }
+
+    // Función expuesta globalmente para los botones del Staging
+    window.DocTireAssignment = window.DocTireAssignment || {};
+    window.DocTireAssignment.DragDrop = window.DocTireAssignment.DragDrop || {};
+    window.DocTireAssignment.DragDrop.sendToDest = function(destino, tireCode) {
+        var card = stagingZone.querySelector('.staging-tire-card[data-tire-code="' + tireCode + '"]');
+        if (!card) return;
+
+        var detail = State.llantasSeleccionadas.find(l => l.tire_code === tireCode && (l.action_type === 'REMOVE' || l.action_type === 'SCRAP'));
+        if (detail) {
+            detail.warehouse_code_to = destino === 'TALLER' ? 'TALLER' : 'MAIN';
+            detail.comments = (detail.comments || '') + ' -> Destino final: ' + destino;
+        }
+
+        card.style.opacity = '0';
+        card.style.transform = 'translateX(20px)';
+        setTimeout(function() { 
+            card.remove(); 
+            if (stagingZone.children.length <= 1) { // 1 porque siempre está el empty-msg oculto
+                document.getElementById('staging-empty-msg').style.display = 'block';
+            }
+        }, 300);
+
+        State.markDirty();
+    };
+
+    function updatePositionInDOM(vehicleCode, positionKey, tireCode, tireName, tireSize) {
+        var chassisModule = window.DocTireAssignment.Chassis;
+        if (chassisModule && chassisModule.updatePosition) {
+            chassisModule.updatePosition(vehicleCode, positionKey, tireCode, tireName, tireSize);
+        }
+    }
+
+    function getPositionFromState(positionKey) {
+        var chassisModule = window.DocTireAssignment.Chassis;
+        if (chassisModule && chassisModule.getAllPositions) {
+            var positions = chassisModule.getAllPositions();
+            return positions.find(p => p.positionKey === positionKey);
+        }
+        return null;
+    }
+
+    function updateTireInState(tireCode, tireName, data) {
+        var detail = State.llantasSeleccionadas.find(l => l.tire_code === tireCode);
+        if (detail) {
+            Object.assign(detail, data);
+        } else {
+            State.llantasSeleccionadas.push(Object.assign({
+                tire_code: tireCode,
+                tire_name: tireName,
+                action_type: 'ASSIGN'
+            }, data));
+        }
+    }
+
+    function removeTireFromWarehouse(tireCode) {
+        if (!tireWarehouse) return;
+        var rows = tireWarehouse.querySelectorAll('tr');
+        rows.forEach(function(row) {
+            if (row.getAttribute('data-tire-code') === tireCode) {
+                row.style.display = 'none';
+                row.classList.add('tire-removed-from-warehouse');
+            }
+        });
+    }
+
+    function updateSummary() {
+        var assigned = State.llantasSeleccionadas.filter(l => l.action_type === 'ASSIGN' || l.action_type === 'TRANSFER').length;
+        var rotate = State.llantasSeleccionadas.filter(l => l.action_type === 'ROTATE').length;
+        var baja = State.llantasSeleccionadas.filter(l => l.action_type === 'REMOVE' || l.action_type === 'SCRAP').length;
+
+        var elAssigned = document.getElementById('summary-assigned-count');
+        var elRotate = document.getElementById('summary-rotation-count');
+        var elBaja = document.getElementById('summary-baja-count');
+        var elTotal = document.getElementById('summary-total-count');
+
+        if (elAssigned) elAssigned.textContent = assigned;
+        if (elRotate) elRotate.textContent = rotate;
+        if (elBaja) elBaja.textContent = baja;
+        if (elTotal) elTotal.textContent = assigned + rotate + baja;
+    }
+
+    function escapeHtml(str) {
+        if (typeof str !== 'string') return String(str || '');
+        return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;');
+    }
+
+    module.initDragDrop = function() { init(); };
+})(window.DocTireAssignment);

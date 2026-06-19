@@ -1,0 +1,439 @@
+/**
+ * doc-tire-assignment-tire-warehouse.js
+ * 
+ * Responsabilidad: Gestión del almacén lateral de llantas disponibles.
+ * Renderiza la tabla de llantas disponibles para arrastrar al chasis.
+ * Maneja búsqueda y filtrado de llantas.
+ * Sincroniza con el estado global de llantas seleccionadas.
+ */
+
+(function(module) {
+    'use strict';
+
+    var State = module.State;
+    var Events = module.Events;
+
+    /**
+     * Referencias a elementos del DOM
+     */
+    var warehouseTable = null;
+    var warehouseBody = null;
+    var searchInput = null;
+    var addDetailBtn = null;
+
+    /**
+     * Todas las llantas disponibles (caché para filtrado)
+     */
+    var allAvailableTires = [];
+
+    /**
+     * Inicializa el módulo del almacén de llantas
+     */
+    function init() {
+        warehouseTable = document.getElementById('doc-details-table');
+        
+        if (!warehouseTable) {
+            console.warn('[doc-tire-assignment-tire-warehouse] Elemento #doc-details-table no encontrado.');
+            return;
+        }
+
+        warehouseBody = warehouseTable.querySelector('tbody');
+        searchInput = document.getElementById('search-tyre');
+        addDetailBtn = document.getElementById('add-detail-row');
+
+        // Cargar llantas disponibles
+        loadAvailableTires();
+
+        // Inicializar búsqueda
+        if (searchInput) {
+            searchInput.addEventListener('input', function(e) {
+                filterTires(e.target.value);
+            });
+
+            searchInput.addEventListener('search', function(e) {
+                filterTires(e.target.value);
+            });
+        }
+
+        // NOTA: El botón #add-detail-row se maneja desde module.js para evitar conflictos
+        // El handler en module.js abre el modal de selección de llantas
+
+        // Escuchar eventos de cambio en llantas seleccionadas (desde el modal)
+        Events.on('tires:selected', function(llantas) {
+            if (!llantas || llantas.length === 0) return;
+
+            console.log('[doc-tire-assignment-tire-warehouse] Recibidas', llantas.length, 'llantas del modal.');
+
+            // Agregar las llantas seleccionadas al almacén visual
+            var added = false;
+            llantas.forEach(function(llanta) {
+                var exists = allAvailableTires.some(function(t) {
+                    return t.tire_code === llanta.tire_code;
+                });
+                if (!exists) {
+                    allAvailableTires.push({
+                        tire_code: llanta.tire_code,
+                        tire_name: llanta.tire_name || llanta.tire_code,
+                        tire_size: llanta.tire_size || '-',
+                        tread_design: llanta.tread_design || '-',
+                        tire_status: 'AV'
+                    });
+                    added = true;
+                }
+            });
+
+            if (added) {
+                console.log('[doc-tire-assignment-tire-warehouse] allAvailableTires ahora tiene', allAvailableTires.length, 'llantas.');
+                // Mostrar notificación
+                var count = llantas.length;
+                if (typeof toastr !== 'undefined') {
+                    toastr.success(count + ' llanta(s) agregada(s) al almacén. Arrástrelas al chasis para asignarlas.', 'Almacén actualizado');
+                }
+            } else {
+                console.log('[doc-tire-assignment-tire-warehouse] No se agregaron llantas nuevas (ya existían).');
+            }
+        });
+
+        Events.on('tire:assigned', function(data) {
+            markTireAsAssigned(data.tireCode);
+        });
+
+        Events.on('tire:removed', function(data) {
+            // Si la llanta fue retirada y vuelve al almacén, mostrarla de nuevo
+            showTireInWarehouse(data.tireCode);
+        });
+
+        Events.on('tire:replaced', function(data) {
+            // La llanta reemplazada vuelve al almacén
+            showTireInWarehouse(data.oldTire);
+            // La nueva llanta ya no está disponible
+            markTireAsAssigned(data.newTire);
+        });
+
+        Events.on('tire:moved', function(data) {
+            // Si la llanta se movió dentro del chasis, no afecta al almacén
+            // Pero si vino del almacén originalmente, actualizar
+        });
+
+        //console.log('[doc-tire-assignment-tire-warehouse] Módulo de almacén de llantas inicializado.');
+    }
+
+    /**
+     * Carga las llantas disponibles desde el endpoint AJAX (solo para el modal)
+     * El almacén lateral se llena únicamente con llantas seleccionadas desde el modal.
+     */
+    function loadAvailableTires() {
+        if (!warehouseBody) return;
+
+        // Mostrar mensaje de vacío inicial - las llantas se agregan desde el modal
+        warehouseBody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-4">' +
+            'No hay llantas en el almacén.<br>' +
+            '<small>Use el botón "<strong>+ Llantas</strong>" para seleccionar llantas disponibles.</small>' +
+            '</td></tr>';
+
+        // NO cargamos allAvailableTires aquí - se llena solo con llantas seleccionadas del modal
+        allAvailableTires = [];
+    }
+
+    /**
+     * Carga llantas desde formOptions como fallback
+     */
+    function loadFromFormOptions() {
+        var tireOptions = (State.config.formOptions && State.config.formOptions.tire_options) || [];
+
+        if (tireOptions.length > 0) {
+            allAvailableTires = tireOptions.map(function(t) {
+                return {
+                    tire_code: t.code || t.tire_code || '',
+                    tire_name: t.name || t.tire_name || '',
+                    tire_size: t.size || t.tire_size || '-',
+                    tread_design: t.tread || t.tread_design || '-',
+                    tire_status: t.status || t.tire_status || 'AVAILABLE'
+                };
+            });
+            renderWarehouse(allAvailableTires);
+        } else {
+            warehouseBody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-4">No hay llantas disponibles en el almacén.<br><small>Utilice el botón "+ Nueva" para agregar desde el modal.</small></td></tr>';
+        }
+    }
+
+    /**
+     * Renderiza la tabla del almacén de llantas
+     */
+    function renderWarehouse(tires) {
+        if (!warehouseBody) {
+            console.warn('[doc-tire-assignment-tire-warehouse] warehouseBody es null, reintentando...');
+            warehouseBody = document.getElementById('doc-details-body');
+            if (!warehouseBody) {
+                console.error('[doc-tire-assignment-tire-warehouse] #doc-details-body no encontrado.');
+                return;
+            }
+        }
+
+        if (!tires || tires.length === 0) {
+            warehouseBody.innerHTML = '<tr><td colspan="4" class="text-center text-muted py-4">No hay llantas disponibles en el almacén.</td></tr>';
+            Events.emit('tire:warehouse:rendered', []);
+            return;
+        }
+
+        // Filtrar llantas que ya están asignadas a posiciones en el chasis
+        var mountedCodes = getMountedTireCodes();
+        console.log('[doc-tire-assignment-tire-warehouse] renderWarehouse: total=' + tires.length + ', mountedCodes=' + JSON.stringify(mountedCodes));
+        var availableTires = tires.filter(function(t) {
+            return mountedCodes.indexOf(t.tire_code) === -1 && 
+                   !isTireInStateAsRemoved(t.tire_code);
+        });
+        console.log('[doc-tire-assignment-tire-warehouse] renderWarehouse: disponibles después de filtro=' + availableTires.length);
+
+        var html = '';
+        availableTires.forEach(function(tire) {
+            var code = tire.tire_code || '';
+            var name = tire.tire_name || code;
+            var size = tire.tire_size || '-';
+            var tread = tire.tread_design || '-';
+
+            html += '<tr draggable="true" data-tire-code="' + escapeHtml(code) + '" data-tire-name="' + escapeHtml(name) + '" data-tire-size="' + escapeHtml(size) + '" class="warehouse-tire-row">';
+            html += '  <td class="text-nowrap"><strong>' + escapeHtml(code) + '</strong></td>';
+            html += '  <td>' + escapeHtml(name) + '</td>';
+            html += '  <td class="text-nowrap">' + escapeHtml(size) + '</td>';
+            html += '  <td class="text-nowrap">';
+            html += '    <span class="badge bg-light text-dark border text-xxs">' + escapeHtml(tread) + '</span>';
+            html += '  </td>';
+            html += '</tr>';
+        });
+
+        if (availableTires.length === 0) {
+            html = '<tr><td colspan="4" class="text-center text-muted py-4">Todas las llantas disponibles están asignadas a posiciones en el chasis.</td></tr>';
+        }
+
+        warehouseBody.innerHTML = html;
+
+        // Emitir evento para que el módulo de drag & drop inicialice los drags
+        Events.emit('tire:warehouse:rendered', availableTires);
+
+        console.log('[doc-tire-assignment-tire-warehouse] Almacén renderizado con', availableTires.length, 'llantas disponibles.');
+    }
+
+    /**
+     * Filtra las llantas por texto de búsqueda
+     */
+    function filterTires(searchText) {
+        if (!warehouseBody) return;
+
+        var term = (searchText || '').toLowerCase().trim();
+
+        if (!term) {
+            renderWarehouse(allAvailableTires);
+            return;
+        }
+
+        var filtered = allAvailableTires.filter(function(tire) {
+            var code = (tire.tire_code || '').toLowerCase();
+            var name = (tire.tire_name || '').toLowerCase();
+            var size = (tire.tire_size || '').toLowerCase();
+            var tread = (tire.tread_design || '').toLowerCase();
+
+            return code.indexOf(term) !== -1 || 
+                   name.indexOf(term) !== -1 || 
+                   size.indexOf(term) !== -1 || 
+                   tread.indexOf(term) !== -1;
+        });
+
+        renderWarehouse(filtered);
+    }
+
+    /**
+     * Actualiza el almacén desde el estado global
+     */
+    function updateWarehouseFromState() {
+        // Re-renderizar todo el almacén basado en las llantas seleccionadas
+        renderWarehouse(allAvailableTires);
+    }
+
+    /**
+     * Marca una llanta como asignada (oculta del almacén)
+     */
+    function markTireAsAssigned(tireCode) {
+        if (!warehouseBody) return;
+
+        var rows = warehouseBody.querySelectorAll('tr.warehouse-tire-row');
+        rows.forEach(function(row) {
+            var code = row.getAttribute('data-tire-code');
+            if (code === tireCode) {
+                row.style.display = 'none';
+                row.classList.add('tire-assigned');
+            }
+        });
+    }
+
+    /**
+     * Muestra una llanta de vuelta en el almacén (cuando se retira del chasis)
+     */
+    function showTireInWarehouse(tireCode) {
+        if (!warehouseBody) return;
+
+        var rows = warehouseBody.querySelectorAll('tr.warehouse-tire-row.tire-assigned');
+        var found = false;
+        rows.forEach(function(row) {
+            var code = row.getAttribute('data-tire-code');
+            if (code === tireCode) {
+                row.style.display = '';
+                row.classList.remove('tire-assigned');
+                row.classList.remove('tire-removed');
+                row.style.backgroundColor = '';
+                row.style.textDecoration = '';
+                row.style.opacity = '1';
+                found = true;
+            }
+        });
+
+        // Si no estaba en la tabla actual (fue filtrada), re-renderizar
+        if (!found) {
+            renderWarehouse(allAvailableTires);
+        }
+    }
+
+    /**
+     * Obtiene los códigos de llantas montadas en el chasis
+     */
+    function getMountedTireCodes() {
+        var mountedCodes = [];
+
+        // Obtener desde el chasis
+        var chassisModule = window.DocTireAssignment.Chassis;
+        if (chassisModule && chassisModule.getAllPositions) {
+            var positions = chassisModule.getAllPositions();
+            positions.forEach(function(p) {
+                if (p.hasTire && p.tireCode) {
+                    mountedCodes.push(p.tireCode);
+                }
+            });
+        }
+
+        // También desde el estado global (por si hay asignaciones pendientes)
+        State.llantasSeleccionadas.forEach(function(l) {
+            if (l.action_type === 'ASSIGN' || l.action_type === 'TRANSFER') {
+                if (l.tire_code && mountedCodes.indexOf(l.tire_code) === -1) {
+                    mountedCodes.push(l.tire_code);
+                }
+            }
+        });
+
+        return mountedCodes;
+    }
+
+    /**
+     * Verifica si una llanta está marcada como retirada/baja en el estado
+     */
+    function isTireInStateAsRemoved(tireCode) {
+        return State.llantasSeleccionadas.some(function(l) {
+            return l.tire_code === tireCode && 
+                   (l.action_type === 'REMOVE' || l.action_type === 'SCRAP');
+        });
+    }
+
+    /**
+     * Recarga el almacén (útil después de cambios externos)
+     */
+    function reloadWarehouse() {
+        loadAvailableTires();
+    }
+
+    /**
+     * Agrega una llanta al almacén visual (desde modal)
+     */
+    function addTireToWarehouseFromModal(tireCode, tireName, tireSize, treadDesign) {
+        // Verificar si ya existe en allAvailableTires
+        var exists = allAvailableTires.some(function(t) {
+            return t.tire_code === tireCode;
+        });
+
+        if (!exists) {
+            allAvailableTires.push({
+                tire_code: tireCode,
+                tire_name: tireName || tireCode,
+                tire_size: tireSize || '-',
+                tread_design: treadDesign || '-',
+                tire_status: 'AVAILABLE'
+            });
+        }
+
+        renderWarehouse(allAvailableTires);
+    }
+
+    /**
+     * Obtiene todas las llantas actualmente visibles en el almacén
+     */
+    function getVisibleWarehouseTires() {
+        if (!warehouseBody) return [];
+
+        var tires = [];
+        var rows = warehouseBody.querySelectorAll('tr.warehouse-tire-row');
+        rows.forEach(function(row) {
+            if (row.style.display !== 'none') {
+                tires.push({
+                    tireCode: row.getAttribute('data-tire-code'),
+                    tireName: row.getAttribute('data-tire-name'),
+                    tireSize: row.getAttribute('data-tire-size'),
+                    element: row
+                });
+            }
+        });
+        return tires;
+    }
+
+    /**
+     * Escapa HTML para evitar XSS
+     */
+    function escapeHtml(str) {
+        if (typeof str !== 'string') return String(str || '');
+        return str.replace(/&/g, '&amp;')
+                  .replace(/</g, '&lt;')
+                  .replace(/>/g, '&gt;')
+                  .replace(/"/g, '&quot;')
+                  .replace(/'/g, '&#039;');
+    }
+
+    // =========================================================================
+    // INICIALIZACIÓN
+    // =========================================================================
+
+    /**
+     * Inicializa el módulo
+     */
+    module.initTireWarehouse = function() {
+        init();
+    };
+
+    /**
+     * Expone funciones para uso externo
+     */
+    module.reloadWarehouse = function() {
+        reloadWarehouse();
+    };
+
+    module.addTireToWarehouseFromModal = function(tireCode, tireName, tireSize, treadDesign) {
+        addTireToWarehouseFromModal(tireCode, tireName, tireSize, treadDesign);
+    };
+
+    module.getVisibleWarehouseTires = function() {
+        return getVisibleWarehouseTires();
+    };
+
+    module.filterTires = function(searchText) {
+        filterTires(searchText);
+    };
+
+    module.markTireAsAssigned = function(tireCode) {
+        markTireAsAssigned(tireCode);
+    };
+
+    module.showTireInWarehouse = function(tireCode) {
+        showTireInWarehouse(tireCode);
+    };
+
+    module.getWarehouseTireCodes = function() {
+        return allAvailableTires.map(function(t) { return t.tire_code; });
+    };
+
+})(window.DocTireAssignment);

@@ -1,0 +1,215 @@
+/**
+ * doc-tire-assignment-attachments.js
+ * 
+ * Responsabilidad: Gestión de la tabla de adjuntos.
+ * Permite agregar filas con archivo, número de línea y notas.
+ * Los adjuntos se incluyen en el payload al guardar el documento.
+ */
+
+(function(module) {
+    'use strict';
+
+    var State = module.State;
+    var Events = module.Events;
+
+    /**
+     * Referencias a elementos del DOM
+     */
+    var attachmentsBody = null;
+    var addAttachmentBtn = null;
+    var attachmentCounter = 0;
+
+    /**
+     * Inicializa el módulo de adjuntos
+     */
+    function init() {
+        attachmentsBody = document.getElementById('doc-attachments-body');
+        addAttachmentBtn = document.getElementById('add-attachment-row');
+
+        if (!attachmentsBody) {
+            console.warn('[doc-tire-assignment-attachments] Elemento #doc-attachments-body no encontrado.');
+            return;
+        }
+
+        // Vincular botón "Agregar Adjunto"
+        if (addAttachmentBtn) {
+            addAttachmentBtn.addEventListener('click', function(e) {
+                e.preventDefault();
+                addAttachmentRow();
+            });
+        }
+
+        // Escuchar evento de guardado para incluir adjuntos
+        Events.on('form:saving', function(payload) {
+            payload.attachments = collectAttachments();
+        });
+
+        // Si hay adjuntos previos en el estado, cargarlos
+        if (State.attachments && State.attachments.length > 0) {
+            State.attachments.forEach(function(att) {
+                addAttachmentRow(att.linenum, att.filename, att.filepath, att.notes);
+            });
+        }
+
+        //console.log('[doc-tire-assignment-attachments] Módulo de adjuntos inicializado.');
+    }
+
+    /**
+     * Agrega una nueva fila de adjunto a la tabla
+     */
+    function addAttachmentRow(linenum, filename, filepath, notes) {
+        if (!attachmentsBody) return;
+
+        attachmentCounter++;
+        var rowId = 'att-row-' + attachmentCounter;
+        var rowNum = linenum || attachmentCounter;
+
+        var tr = document.createElement('tr');
+        tr.id = rowId;
+        tr.className = 'attachment-row';
+        tr.setAttribute('data-att-index', attachmentCounter);
+
+        tr.innerHTML = 
+            '<td style="width: 50px;">' +
+            '  <span class="badge bg-secondary att-linenum-display">' + rowNum + '</span>' +
+            '</td>' +
+            '<td>' +
+            '  <input type="file" class="form-control form-control-sm att-file-input" accept=".pdf,.jpg,.jpeg,.png,.doc,.docx,.xls,.xlsx" data-att-index="' + attachmentCounter + '">' +
+            '  <input type="hidden" class="att-filename-hidden" value="' + escapeHtml(filename || '') + '">' +
+            '  <input type="hidden" class="att-filepath-hidden" value="' + escapeHtml(filepath || '') + '">' +
+            '</td>' +
+            '<td>' +
+            '  <input type="number" class="form-control form-control-sm att-linenum" value="' + rowNum + '" min="1" data-att-index="' + attachmentCounter + '" style="width: 80px;">' +
+            '</td>' +
+            '<td>' +
+            '  <input type="text" class="form-control form-control-sm att-notes" value="' + escapeHtml(notes || '') + '" placeholder="Notas del adjunto" data-att-index="' + attachmentCounter + '">' +
+            '</td>' +
+            '<td style="width: 50px;" class="text-center">' +
+            '  <button type="button" class="btn btn-outline-danger btn-xs btn-remove-attachment" data-att-index="' + attachmentCounter + '" title="Eliminar adjunto">' +
+            '    <svg class="svg-inline--fa fa-trash-can" viewBox="0 0 448 512" style="width:12px;"><path fill="currentColor" d="M135.2 17.7L128 32H32C14.3 32 0 46.3 0 64S14.3 96 32 96H416c17.7 0 32-14.3 32-32s-14.3-32-32-32H320l-7.2-14.3C307.4 6.8 296.3 0 284.2 0H163.8c-12.1 0-23.2 6.8-28.6 17.7zM416 128H32L53.2 467c1.6 25.3 22.6 45 47.9 45H346.9c25.3 0 46.3-19.7 47.9-45L416 128z"></path></svg>' +
+            '  </button>' +
+            '</td>';
+
+        attachmentsBody.appendChild(tr);
+
+        // Vincular evento al botón de eliminar
+        var removeBtn = tr.querySelector('.btn-remove-attachment');
+        if (removeBtn) {
+            removeBtn.addEventListener('click', function() {
+                removeAttachmentRow(rowId);
+            });
+        }
+
+        // Vincular evento al input de número de línea
+        var linenumInput = tr.querySelector('.att-linenum');
+        if (linenumInput) {
+            linenumInput.addEventListener('change', function() {
+                var display = tr.querySelector('.att-linenum-display');
+                if (display) {
+                    display.textContent = this.value || attachmentCounter;
+                }
+            });
+        }
+
+        // Vincular evento al input de archivo para previsualizar nombre
+        var fileInput = tr.querySelector('.att-file-input');
+        if (fileInput) {
+            fileInput.addEventListener('change', function() {
+                var hiddenFilename = tr.querySelector('.att-filename-hidden');
+                var hiddenFilepath = tr.querySelector('.att-filepath-hidden');
+                if (this.files && this.files.length > 0) {
+                    if (hiddenFilename) hiddenFilename.value = this.files[0].name;
+                    if (hiddenFilepath) hiddenFilepath.value = 'upload/' + this.files[0].name;
+                }
+            });
+        }
+
+        State.markDirty();
+    }
+
+    /**
+     * Elimina una fila de adjunto
+     */
+    function removeAttachmentRow(rowId) {
+        var row = document.getElementById(rowId);
+        if (row && row.parentNode) {
+            row.parentNode.removeChild(row);
+            State.markDirty();
+        }
+    }
+
+    /**
+     * Recolecta todos los adjuntos del formulario
+     */
+    function collectAttachments() {
+        var attachments = [];
+        var rows = attachmentsBody.querySelectorAll('tr.attachment-row');
+
+        rows.forEach(function(row) {
+            var fileInput = row.querySelector('.att-file-input');
+            var filenameHidden = row.querySelector('.att-filename-hidden');
+            var filepathHidden = row.querySelector('.att-filepath-hidden');
+            var linenumInput = row.querySelector('.att-linenum');
+            var notesInput = row.querySelector('.att-notes');
+
+            var filename = '';
+            var filepath = '';
+
+            // Si hay un archivo seleccionado, usarlo
+            if (fileInput && fileInput.files && fileInput.files.length > 0) {
+                filename = fileInput.files[0].name;
+                filepath = 'uploads/' + filename;
+            } else if (filenameHidden && filenameHidden.value) {
+                // Si ya tenía datos previos
+                filename = filenameHidden.value;
+                filepath = filepathHidden ? filepathHidden.value : '';
+            }
+
+            if (!filename) return; // Saltar filas sin archivo
+
+            attachments.push({
+                linenum: linenumInput ? parseInt(linenumInput.value, 10) || 1 : 1,
+                filename: filename,
+                filepath: filepath,
+                notes: notesInput ? notesInput.value : ''
+            });
+        });
+
+        return attachments;
+    }
+
+    /**
+     * Escapa HTML para evitar XSS
+     */
+    function escapeHtml(str) {
+        if (typeof str !== 'string') return String(str || '');
+        return str.replace(/&/g, '&amp;')
+                  .replace(/</g, '&lt;')
+                  .replace(/>/g, '&gt;')
+                  .replace(/"/g, '&quot;')
+                  .replace(/'/g, '&#039;');
+    }
+
+    // =========================================================================
+    // INICIALIZACIÓN
+    // =========================================================================
+
+    /**
+     * Inicializa el módulo
+     */
+    module.initAttachments = function() {
+        init();
+    };
+
+    /**
+     * Expone funciones para uso externo
+     */
+    module.collectAttachments = function() {
+        return collectAttachments();
+    };
+
+    module.addAttachmentRow = function(linenum, filename, filepath, notes) {
+        addAttachmentRow(linenum, filename, filepath, notes);
+    };
+
+})(window.DocTireAssignment);
